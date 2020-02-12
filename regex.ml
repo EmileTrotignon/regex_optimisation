@@ -46,20 +46,26 @@ end = struct
   let compare (r1 : t) (r2 : t) = compare r1 r2
 
   let rec to_string r : string =
-    let rec aux_sum set =
-      if RegexSet.cardinal set >= 2 then
-        let ele = RegexSet.choose set in
-        "(" ^ to_string ele ^ ")+" ^ aux_sum (RegexSet.remove ele set)
-      else if RegexSet.cardinal set = 1 then
-        "(" ^ to_string (RegexSet.choose set) ^ ")"
-      else ""
+    let aux_sum set =
+      let rec aux_aux_sum set =
+        if RegexSet.cardinal set >= 2 then
+          let ele = RegexSet.choose set in
+          to_string ele ^ " + " ^ aux_aux_sum (RegexSet.remove ele set)
+        else if RegexSet.cardinal set = 1 then to_string (RegexSet.choose set)
+        else ""
+      in
+      "(" ^ aux_aux_sum set ^ ")"
+    in
+    let aux_star r =
+      let s = to_string r in
+      if String.length s = 1 then s ^ "*" else "(" ^ s ^ ")*"
     in
     let aux_concat lr = List.fold_left ( ^ ) "" (List.map to_string lr) in
     match r with
     | Empty -> ""
     | Epsilon -> "ε"
     | Letter l -> Letter.to_string l
-    | Star r -> "(" ^ to_string r ^ ")*"
+    | Star r -> aux_star r
     | Sum set -> aux_sum set
     | Concat lr -> aux_concat lr
 
@@ -81,6 +87,7 @@ end = struct
       | Epsilon :: rs -> opti rs
       | r1 :: r2 :: rs -> (
         match (r1, r2) with
+        | Star s, Star s' when s = s' -> opti (r2 :: rs)
         | Sum set1, Star (Sum set2)
           when RegexSet.mem Epsilon set1
                && RegexSet.subset (RegexSet.remove Epsilon set1) set2 ->
@@ -112,46 +119,120 @@ end = struct
 
   and sum set =
     let run_all_opti set =
-      let opti_1 set =
-        let is_ele_opti ele =
-          match ele with
-          | Concat [Star s; s'; r] when s = s' && RegexSet.mem r set -> true
-          | Concat [s; Star s'; r] when s = s' && RegexSet.mem r set -> true
-          | _ -> false
-        in
-        match RegexSet.find_first_opt is_ele_opti set with
-        | Some (Concat [Star s; s'; r]) ->
-            Some
-              (RegexSet.add
-                 (concat [star s; r])
-                 (RegexSet.remove r
-                    (RegexSet.remove (Concat [Star s; s'; r]) set)))
-        | None -> None
-        | _ -> assert false
-      in
-      let opti_2 set =
-        let is_ele_opti ele = match ele with Star r -> true | _ -> false in
-        match RegexSet.find_first_opt is_ele_opti set with
-        | Some (Star r) ->
-            Some (RegexSet.remove Epsilon (RegexSet.remove r set))
-        | Some r -> assert false
-        | None -> None
+      let optimisations =
+        [ (fun set -> (** s*sr + r ~ s*r *)
+            let is_ele_opti ele =
+              match ele with
+              | Concat [Star s; s'; r] when s = s' && RegexSet.mem r set ->
+                  true
+              | _ -> false
+            in
+            match RegexSet.find_first_opt is_ele_opti set with
+            | Some (Concat [Star s; s'; r]) ->
+                Some
+                  (RegexSet.add
+                     (concat [star s; r])
+                     (RegexSet.remove r
+                        (RegexSet.remove (Concat [Star s; s'; r]) set)))
+            | None -> None
+            | _ -> assert false )
+        ; (fun set -> (** ss*r + r ~ s*r *)
+            let is_ele_opti ele =
+              match ele with
+              | Concat [s; Star s'; r] when s = s' && RegexSet.mem r set ->
+                  true
+              | _ -> false
+            in
+            match RegexSet.find_first_opt is_ele_opti set with
+            | Some (Concat [s; Star s'; r]) ->
+                Some
+                  (RegexSet.add
+                     (concat [star s'; r])
+                     (RegexSet.remove r
+                        (RegexSet.remove (Concat [s; Star s'; r]) set)))
+            | None -> None
+            | _ -> assert false )
+        ; (fun set -> (** rss* + r ~ rs* *)
+            let is_ele_opti ele =
+              match ele with
+              | Concat [r; s'; Star s] when s = s' && RegexSet.mem r set ->
+                  true
+              | _ -> false
+            in
+            match RegexSet.find_first_opt is_ele_opti set with
+            | Some (Concat [r; s'; Star s]) ->
+                Some
+                  (RegexSet.add
+                     (concat [r; star s])
+                     (RegexSet.remove r
+                        (RegexSet.remove (Concat [r; s'; Star s]) set)))
+            | None -> None
+            | _ -> assert false )
+        ; (fun set -> (** rs*s + r ~ rs* *)
+            let is_ele_opti ele =
+              match ele with
+              | Concat [r; Star s'; s] when s = s' && RegexSet.mem r set ->
+                  true
+              | _ -> false
+            in
+            match RegexSet.find_first_opt is_ele_opti set with
+            | Some (Concat [r; Star s'; s]) ->
+                Some
+                  (RegexSet.add
+                     (concat [r; star s])
+                     (RegexSet.remove r
+                        (RegexSet.remove (Concat [r; Star s'; s]) set)))
+            | None -> None
+            | _ -> assert false )
+        ; (fun set -> (** s* + s ~ s* *)
+            let is_ele_opti ele =
+              match ele with
+              | Star r when RegexSet.mem Epsilon set || RegexSet.mem r set ->
+                  true
+              | _ -> false
+            in
+            match RegexSet.find_first_opt is_ele_opti set with
+            | Some (Star r) ->
+                Some (RegexSet.remove Epsilon (RegexSet.remove r set))
+            | Some r -> assert false
+            | None -> None )
+        ; (fun set -> (** r + rs* ~ rs* *)
+            let is_ele_opti ele =
+              match ele with
+              | Concat [r; Star s] when RegexSet.mem r set ->
+                  true
+              | _ -> false
+            in
+            match RegexSet.find_first_opt is_ele_opti set with
+            | Some (Concat [r; Star s]) ->
+                Some (RegexSet.remove r set)
+            | Some r -> assert false
+            | None -> None )
+        ; (fun set -> (** r + s*r ~ s*r *)
+            let is_ele_opti ele =
+              match ele with
+              | Concat [Star s; r] when RegexSet.mem r set ->
+                  true
+              | _ -> false
+            in
+            match RegexSet.find_first_opt is_ele_opti set with
+            | Some (Concat [Star s; r]) ->
+                Some (RegexSet.remove r set)
+            | Some r -> assert false
+            | None -> None )]
       in
       let set' = ref set in
       let b = ref true in
+      let run_opti opti =
+        match opti !set' with
+        | Some set'' ->
+            set' := set'' ;
+            b := true
+        | None -> ()
+      in
       while !b do
         b := false ;
-        match opti_1 !set' with
-        | Some set'' ->
-            (set' := set'' ;
-            b := true)
-        | None -> (
-            () ;
-            match opti_2 !set' with
-            | Some set'' ->
-                (set' := set'' ;
-                b := true)
-            | None -> () )
+        List.iter run_opti optimisations
       done ;
       !set'
     in
@@ -227,11 +308,12 @@ let yamada a =
         done
       done ;
       for k = 0 to n_state - 1 do
+        let old_l = Array.map Array.copy l in
         for p = 0 to n_state - 1 do
           for q = 0 to n_state - 1 do
             let nlpq =
               sum_from_list
-                [l.(p).(q); concat [l.(p).(k); star l.(k).(k); l.(k).(q)]]
+                [old_l.(p).(q); concat [old_l.(p).(k); star old_l.(k).(k); old_l.(k).(q)]]
               (*concat
                 [ sum_from_list [l.(p).(q); l.(p).(k)]
                 ; star l.(k).(k)
